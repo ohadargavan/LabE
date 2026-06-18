@@ -199,7 +199,7 @@ void print_relocations() {
             }
         }
     }
-}סבב
+}
 void check_files_for_merge() { printf("Not implemented yet\n"); }
 void merge_elf_files() { printf("Not implemented yet\n"); }
 void quit() { 
