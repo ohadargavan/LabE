@@ -149,7 +149,57 @@ void print_symbols() {
         }
     }
 }
-void print_relocations() { printf("Not implemented yet\n"); }
+void print_relocations() {
+    if (map_start == NULL) {
+        printf("Error: No file currently mapped.\n");
+        return;
+    }
+
+    Elf32_Ehdr *header = (Elf32_Ehdr *)map_start;
+    
+    // pointer to the start of the section header table, acts like an array for the sections
+    Elf32_Shdr *shdr = (Elf32_Shdr *)(map_start + header->e_shoff);
+
+    // string table for the section names (to print the table header)
+    char *shstrtab = (char *)(map_start + shdr[header->e_shstrndx].sh_offset);
+
+    for (int i = 0; i < header->e_shnum; i++) {
+        // look for relocation sections (usually SHT_REL in 32-bit)
+        if (shdr[i].sh_type == SHT_REL) {
+            
+            // pointer to the relocation table itself and calc the number of entries
+            Elf32_Rel *rel = (Elf32_Rel *)(map_start + shdr[i].sh_offset);
+            int num_rels = shdr[i].sh_size / shdr[i].sh_entsize;
+
+            // find the symbol table linked to this relocation section using sh_link
+            Elf32_Shdr *symtab_shdr = &shdr[shdr[i].sh_link];
+            Elf32_Sym *symtab = (Elf32_Sym *)(map_start + symtab_shdr->sh_offset);
+
+            // find the string table of the symbol table using sh_link of the symbol table
+            char *strtab = (char *)(map_start + shdr[symtab_shdr->sh_link].sh_offset);
+
+            printf("\nRelocation section '%s' at offset 0x%x contains %d entries:\n",
+                   shstrtab + shdr[i].sh_name, shdr[i].sh_offset, num_rels);
+            printf(" Offset     Info     Type      Sym.Value  Sym. Name\n");
+
+            // loop through all relocation entries
+            for (int j = 0; j < num_rels; j++) {
+                // extract the index and type using the elf macros
+                int sym_idx = ELF32_R_SYM(rel[j].r_info);
+                int rel_type = ELF32_R_TYPE(rel[j].r_info);
+
+                // get the matching symbol from the symbol table
+                Elf32_Sym *sym = &symtab[sym_idx];
+                
+                // get the actual symbol name
+                char *sym_name = strtab + sym->st_name;
+
+                printf("%08x  %08x %-9d %08x   %s\n",
+                       rel[j].r_offset, rel[j].r_info, rel_type, sym->st_value, sym_name);
+            }
+        }
+    }
+}סבב
 void check_files_for_merge() { printf("Not implemented yet\n"); }
 void merge_elf_files() { printf("Not implemented yet\n"); }
 void quit() { 
