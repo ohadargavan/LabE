@@ -230,7 +230,91 @@ void print_relocations() {
     }
 }
 
-void check_files_for_merge() { printf("Not implemented yet\n"); }
+// helper function to locate symtab, strtab, and calculate number of symbols for a given file index
+void get_symbol_table_info(int file_idx, Elf32_Sym **symtab, char **strtab, int *num_syms) {
+    Elf32_Ehdr *hdr = (Elf32_Ehdr *)map_start[file_idx];
+    Elf32_Shdr *shdr = (Elf32_Shdr *)(map_start[file_idx] + hdr->e_shoff);
+
+    // loop through all sections to find the symbol table
+    for (int i = 0; i < hdr->e_shnum; i++) {
+        if (shdr[i].sh_type == SHT_SYMTAB) {
+            // set the pointers to the correct addresses in memory
+            *symtab = (Elf32_Sym *)(map_start[file_idx] + shdr[i].sh_offset);
+            *num_syms = shdr[i].sh_size / shdr[i].sh_entsize;
+            *strtab = (char *)(map_start[file_idx] + shdr[shdr[i].sh_link].sh_offset);
+            return;
+        }
+    }
+}
+
+// helper function to check symbols of one file against another
+void check_symbols_against_other(Elf32_Sym *symtab_A, int num_syms_A, char *strtab_A,
+                                 Elf32_Sym *symtab_B, int num_syms_B, char *strtab_B,
+                                 int check_duplicates) {
+                                     
+    // loop through file A symbols (skip dummy symbol index 0)
+    for (int i = 1; i < num_syms_A; i++) {
+        char *sym_name_A = strtab_A + symtab_A[i].st_name;
+        
+        // skip internal symbols with no names
+        if (strlen(sym_name_A) == 0) continue;
+
+        int found_in_B = 0;
+        int defined_in_B = 0;
+        
+        // search for the exact same symbol name in file B
+        for (int j = 1; j < num_syms_B; j++) {
+            char *sym_name_B = strtab_B + symtab_B[j].st_name;
+            if (strcmp(sym_name_A, sym_name_B) == 0) {
+                found_in_B = 1;
+                // if the section index is not undefined, it means it is defined
+                if (symtab_B[j].st_shndx != SHN_UNDEF) defined_in_B = 1; 
+                break;
+            }
+        }
+
+        int defined_in_A = (symtab_A[i].st_shndx != SHN_UNDEF);
+
+        // rule 1: undefined in A and not defined in B
+        if (!defined_in_A && (!found_in_B || !defined_in_B)) {
+            printf("Symbol %s undefined\n", sym_name_A);
+        } 
+        // rule 2: multiply defined (only if the flag allows checking duplicates)
+        else if (check_duplicates && defined_in_A && found_in_B && defined_in_B) {
+            printf("Symbol %s multiply defined\n", sym_name_A);
+        }
+    }
+}
+
+void check_files_for_merge() {
+    // verify we have exactly 2 files open
+    if (num_of_files < 2) {
+        printf("Error: Need exactly 2 mapped files for merge check.\n");
+        return;
+    }
+
+    Elf32_Sym *symtab1 = NULL, *symtab2 = NULL;
+    char *strtab1 = NULL, *strtab2 = NULL;
+    int num_syms1 = 0, num_syms2 = 0;
+
+    // fetch symbol table info for both files using the helper (passing addresses with &)
+    get_symbol_table_info(0, &symtab1, &strtab1, &num_syms1);
+    get_symbol_table_info(1, &symtab2, &strtab2, &num_syms2);
+
+    // if one of them is missing a symbol table, we can't compare
+    if (!symtab1 || !symtab2) {
+        printf("feature not supported (missing symtab)\n");
+        return;
+    }
+
+    // pass 1: check file 1 against file 2 (check_duplicates = 1)
+    check_symbols_against_other(symtab1, num_syms1, strtab1, symtab2, num_syms2, strtab2, 1);
+
+    // pass 2: check file 2 against file 1 (check_duplicates = 0)
+    check_symbols_against_other(symtab2, num_syms2, strtab2, symtab1, num_syms1, strtab1, 0);
+}
+
+
 void merge_elf_files() { printf("Not implemented yet\n"); }
 
 void quit() { 
