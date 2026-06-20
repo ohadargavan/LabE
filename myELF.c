@@ -30,7 +30,8 @@ void examine_elf_file() {
 
     char filename[100];
     printf("enter ELF file name: ");
-    scanf("%s", filename);
+    // limit the input width so it cannot overflow the buffer
+    scanf("%99s", filename);
 
     // opening the file (read only) into the correct array index
     current_fd[num_of_files] = open(filename, O_RDONLY);
@@ -69,9 +70,26 @@ void examine_elf_file() {
 
     // convert the pointer to ELF header structure
     Elf32_Ehdr *header = (Elf32_Ehdr *) map_start[num_of_files];
-    
+
+    // check the magic number (including byte 0) before using the header.
+    // if it is not a real ELF file, undo the mapping and refuse to continue.
+    unsigned char *ident = header->e_ident;
+    if (file_size[num_of_files] < (off_t)sizeof(Elf32_Ehdr) ||
+        ident[0] != 0x7f || ident[1] != 'E' || ident[2] != 'L' || ident[3] != 'F') {
+        printf("Error: '%s' is not an ELF file\n", filename);
+        munmap(map_start[num_of_files], file_size[num_of_files]);
+        close(current_fd[num_of_files]);
+        current_fd[num_of_files] = -1;
+        map_start[num_of_files] = NULL;
+        return;
+    }
+
     // printing details:
     printf("magic bytes: %c %c %c\n", header->e_ident[1], header->e_ident[2], header->e_ident[3]);
+    // print the data encoding scheme taken from byte EI_DATA of e_ident
+    printf("data encoding: %s\n",
+           ident[EI_DATA] == ELFDATA2LSB ? "2's complement, little endian" :
+           ident[EI_DATA] == ELFDATA2MSB ? "2's complement, big endian" : "none/unknown");
     printf("entry point: 0x%x\n", header->e_entry);
     printf("section header offset: %d\n", header->e_shoff); //where the section header table starts
     printf("amount of section headers: %d\n", header->e_shnum);
@@ -170,7 +188,8 @@ void print_symbols() {
                 //print title for table with file number
                 printf("\nFile %d: Symbol table '%s' contains %d entries:\n", 
                        k + 1, shstrtab + shdr[i].sh_name, num_symbols);
-                printf("[Nr] Value    Size SectionName      Name\n");
+                // SecIdx column added so the format matches the required one (value, section index, name)
+                printf("[Nr] Value    SecIdx Size SectionName      Name\n");
 
                 //print each symbol
                 for (int j = 0; j < num_symbols; j++) {
@@ -189,8 +208,9 @@ void print_symbols() {
                         sec_name = "UNKNOWN";
                     }
 
-                    printf("[%2d] %08x %4d %-14s %s\n",
-                           j, symtab[j].st_value, symtab[j].st_size, sec_name, sym_name);
+                    // print the section index (st_shndx) together with the rest of the fields
+                    printf("[%2d] %08x %6d %4d %-14s %s\n",
+                           j, symtab[j].st_value, symtab[j].st_shndx, symtab[j].st_size, sec_name, sym_name);
                 }
             }
         }
@@ -214,9 +234,15 @@ void print_relocations() {
         // string table for the section names (to print the table header)
         char *shstrtab = (char *)(map_start[k] + shdr[header->e_shstrndx].sh_offset);
 
+        // flag that stays 0 until we find at least one relocation section in this file
+        int found_rel = 0;
+
         for (int i = 0; i < header->e_shnum; i++) {
             // look for relocation sections (usually SHT_REL in 32-bit)
             if (shdr[i].sh_type == SHT_REL) {
+
+                // we found a relocation section, remember it for the "No relocations" check
+                found_rel = 1;
                 
                 // pointer to the relocation table itself and calc the number of entries
                 Elf32_Rel *rel = (Elf32_Rel *)(map_start[k] + shdr[i].sh_offset);
@@ -256,6 +282,11 @@ void print_relocations() {
                 }
             }
         }
+
+        // if this file had no relocation sections at all, say so (as the task requires)
+        if (!found_rel) {
+            printf("\nFile %d: No relocations\n", k + 1);
+        }
     }
 }
 
@@ -274,6 +305,17 @@ void get_symbol_table_info(int file_idx, Elf32_Sym **symtab, char **strtab, int 
             return;
         }
     }
+}
+
+// helper that counts how many symbol tables a given file has (used to enforce "exactly one")
+int count_symbol_tables(int file_idx) {
+    Elf32_Ehdr *hdr = (Elf32_Ehdr *)map_start[file_idx];
+    Elf32_Shdr *shdr = (Elf32_Shdr *)(map_start[file_idx] + hdr->e_shoff);
+    int count = 0;
+    for (int i = 0; i < hdr->e_shnum; i++) {
+        if (shdr[i].sh_type == SHT_SYMTAB) count++;
+    }
+    return count;
 }
 
 // helper function to check symbols of one file against another
@@ -319,6 +361,12 @@ void check_files_for_merge() {
     // verify we have exactly 2 files open
     if (num_of_files < 2) {
         printf("Error: Need exactly 2 mapped files for merge check.\n");
+        return;
+    }
+
+    // each file must contain exactly one symbol table, otherwise we do not support it
+    if (count_symbol_tables(0) != 1 || count_symbol_tables(1) != 1) {
+        printf("feature not supported\n");
         return;
     }
 
