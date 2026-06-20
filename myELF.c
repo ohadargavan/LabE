@@ -19,6 +19,7 @@ int current_fd[2] = {-1, -1}; // array of file descriptors
 void *map_start[2] = {NULL, NULL}; // array of pointers to the mapping start of files
 off_t file_size[2] = {0, 0}; // array of file sizes
 int num_of_files = 0; // counter for open files
+int debug_mode = 0; 
 
 void examine_elf_file() {
     // check if we already reached the limit of 2 files
@@ -61,6 +62,11 @@ void examine_elf_file() {
         return;
     }
 
+    if (debug_mode) {
+        printf("Debug: mapped file '%s', FD: %d, Size: %ld bytes\n", 
+               filename, current_fd[num_of_files], file_size[num_of_files]);
+    }
+
     // convert the pointer to ELF header structure
     Elf32_Ehdr *header = (Elf32_Ehdr *) map_start[num_of_files];
     
@@ -79,7 +85,15 @@ void examine_elf_file() {
 }
 
 // temporary functions
-void toggle_debug_mode() { printf("Not implemented yet\n"); }
+void toggle_debug_mode() {
+    if (debug_mode == 0) {
+        debug_mode = 1;
+        printf("Debug flag now on\n");
+    } else {
+        debug_mode = 0;
+        printf("Debug flag now off\n");
+    }
+}
 
 void print_section_names() {
     // check if at least one file is mapped
@@ -98,6 +112,11 @@ void print_section_names() {
         
         //calculate the actual string table in memory
         char *string_table = (char *)(map_start[k] + string_table_entry->sh_offset);
+
+        if (debug_mode) {
+            printf("Debug: shstrndx = %d, string table offset = 0x%x\n", 
+                   header->e_shstrndx, string_table_entry->sh_offset);
+        }
 
         // print which file we are currently showing
         printf("\nFile %d sections:\n", k + 1);
@@ -139,6 +158,11 @@ void print_symbols() {
                 
                 //calculate amount of symbols in table
                 int num_symbols = shdr[i].sh_size / shdr[i].sh_entsize;
+
+                if (debug_mode) {
+                    printf("Debug: Symbol table size = %d bytes, number of symbols = %d\n", 
+                           shdr[i].sh_size, num_symbols);
+                }
 
                 //find the specific string dict of the strings table with sh_link
                 char *sym_strtab = (char *)(map_start[k] + shdr[shdr[i].sh_link].sh_offset);
@@ -197,6 +221,11 @@ void print_relocations() {
                 // pointer to the relocation table itself and calc the number of entries
                 Elf32_Rel *rel = (Elf32_Rel *)(map_start[k] + shdr[i].sh_offset);
                 int num_rels = shdr[i].sh_size / shdr[i].sh_entsize;
+
+                if (debug_mode) {
+                    printf("Debug: Relocation table size = %d bytes, number of entries = %d\n", 
+                           shdr[i].sh_size, num_rels);
+                }
 
                 // find the symbol table linked to this relocation section using sh_link
                 Elf32_Shdr *symtab_shdr = &shdr[shdr[i].sh_link];
@@ -315,7 +344,96 @@ void check_files_for_merge() {
 }
 
 
-void merge_elf_files() { printf("Not implemented yet\n"); }
+void merge_elf_files() {
+    if (num_of_files < 2) {
+        printf("Error: Need exactly 2 mapped files to merge.\n");
+        return;
+    }
+
+    // create the new output file
+    int fd_out = open("out.ro", O_CREAT | O_WRONLY | O_TRUNC, 0666);
+    if (fd_out < 0) {
+        perror("Failed to create out.ro");
+        return;
+    }
+
+    Elf32_Ehdr *hdr1 = (Elf32_Ehdr *)map_start[0];
+    Elf32_Ehdr *hdr2 = (Elf32_Ehdr *)map_start[1];
+
+    // step 1: prepare a copy of the elf header for the new file
+    Elf32_Ehdr new_hdr = *hdr1;
+
+    // write the initial header to the file to save space (we will update e_shoff later)
+    write(fd_out, &new_hdr, sizeof(Elf32_Ehdr));
+
+    // step 2: copy the section header table from file 1 to memory as our draft
+    int sht_size = hdr1->e_shnum * hdr1->e_shentsize;
+    Elf32_Shdr *new_sht = malloc(sht_size);
+    memcpy(new_sht, map_start[0] + hdr1->e_shoff, sht_size);
+
+    // pointers to string tables to compare section names
+    Elf32_Shdr *shdr1 = (Elf32_Shdr *)(map_start[0] + hdr1->e_shoff);
+    char *shstrtab1 = (char *)(map_start[0] + shdr1[hdr1->e_shstrndx].sh_offset);
+
+    Elf32_Shdr *shdr2 = (Elf32_Shdr *)(map_start[1] + hdr2->e_shoff);
+    char *shstrtab2 = (char *)(map_start[1] + shdr2[hdr2->e_shstrndx].sh_offset);
+
+    // keep track of where we are writing in the new file (starts after the elf header)
+    int current_offset = sizeof(Elf32_Ehdr);
+
+    // step 3: loop through all sections in our draft (skip section 0 which is null)
+    for (int i = 1; i < hdr1->e_shnum; i++) {
+        char *sec_name = shstrtab1 + new_sht[i].sh_name;
+
+        // if the section has no data in file (like .bss), just update offset but don't write
+        if (new_sht[i].sh_type == SHT_NOBITS || new_sht[i].sh_size == 0) {
+            new_sht[i].sh_offset = current_offset;
+            continue;
+        }
+
+        // save the new offset in our draft
+        new_sht[i].sh_offset = current_offset;
+
+        // check if section is mergable
+        if (strcmp(sec_name, ".text") == 0 || strcmp(sec_name, ".data") == 0 || strcmp(sec_name, ".rodata") == 0) {
+            
+            // write file 1 part
+            write(fd_out, map_start[0] + shdr1[i].sh_offset, shdr1[i].sh_size);
+            current_offset += shdr1[i].sh_size;
+
+            // find corresponding section in file 2 and append it
+            for (int j = 1; j < hdr2->e_shnum; j++) {
+                char *name2 = shstrtab2 + shdr2[j].sh_name;
+                if (strcmp(sec_name, name2) == 0) {
+                    // write file 2 part
+                    write(fd_out, map_start[1] + shdr2[j].sh_offset, shdr2[j].sh_size);
+                    
+                    // update the new size in our draft (size1 + size2)
+                    new_sht[i].sh_size += shdr2[j].sh_size;
+                    current_offset += shdr2[j].sh_size;
+                    break;
+                }
+            }
+        } else {
+            // not a mergable section (like .symtab or .strtab), just copy from file 1
+            write(fd_out, map_start[0] + shdr1[i].sh_offset, shdr1[i].sh_size);
+            current_offset += shdr1[i].sh_size;
+        }
+    }
+
+    // step 4: write the updated section header table (our draft) to the end of the file
+    new_hdr.e_shoff = current_offset; // tell the elf header where the table is now!
+    write(fd_out, new_sht, sht_size);
+
+    // step 5: rewind to the start of the file and rewrite the updated elf header
+    lseek(fd_out, 0, SEEK_SET);
+    write(fd_out, &new_hdr, sizeof(Elf32_Ehdr));
+
+    // cleanup
+    close(fd_out);
+    free(new_sht);
+    printf("Merged file created successfully as 'out.ro'\n");
+}
 
 void quit() { 
     // unmap memory and close all open files before exiting
